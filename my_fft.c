@@ -3,9 +3,11 @@
 #include <malloc.h>
 #include <stdlib.h>
 #include <time.h>
+#include <assert.h>
 
-#define FFT_SIZE (1024)
-#define DO_FFT  8
+#define FFT_SIZE (64*1024)
+#define DFT_SIZE 16
+
 double sines[FFT_SIZE];
 double cosines[FFT_SIZE];
 
@@ -56,12 +58,58 @@ static void dft(double *r_i, double *i_i, double *r_o, double *i_o, int size, in
    }
 }
 
-static void fft(double *r_i, double *i_i, double *r_o, double *i_o, int size, int stride) {
+static int reverse_bits(int i, int max) {
+   int o = 0;
+   assert(i < max || i >= 0);
+   i |= max;
+   while(i != 1) {
+      o <<= 1;
+      if(i&1) 
+        o |= 1; 
+      i >>= 1;
+   }
+   return o;
+}
+
+static void fft_v2(double *r_i, double *i_i, double *r_o, double *i_o, int size) {
+    int i, stride, step;
+
+    stride = size/DFT_SIZE;
+    for(i = 0; i < stride ; i++) {
+        int out_offset = reverse_bits(i,stride) * DFT_SIZE;
+        dft(r_i+i, i_i+i,  r_o+out_offset, i_o+out_offset, DFT_SIZE, stride);
+    }
+
+    stride = DFT_SIZE*2;
+    step = FFT_SIZE/stride;
+    while(stride <= FFT_SIZE) {
+       for(i = 0; i < FFT_SIZE; i+= stride) {
+          double *real = r_o+i;
+          double *imag = i_o+i;
+          size = stride/2;
+          for(int j = 0; j < size; j++) {
+             double c = cosines[j*step], s = sines[j*step];
+             double rotated_r =  real[size] * c - imag[size] * s;
+             double rotated_i =  real[size] * s + imag[size] * c;
+             real[size] = real[0] - rotated_r;
+             imag[size] = imag[0] - rotated_i;
+             real[0]    = real[0] + rotated_r;
+             imag[0]    = imag[0] + rotated_i;
+             real++;
+             imag++;
+          }
+       }
+       stride *= 2;
+       step   /= 2;
+    }
+}
+
+static void fft_v1(double *r_i, double *i_i, double *r_o, double *i_o, int size, int stride) {
     int half_size = size/2;
 
-    if(half_size >=  DO_FFT && (half_size & 1) == 0) {
-       fft(r_i,        i_i,        r_o,            i_o,           half_size, stride*2);
-       fft(r_i+stride, i_i+stride, r_o+half_size,  i_o+half_size, half_size, stride*2);
+    if(half_size >  DFT_SIZE && (half_size & 1) == 0) {
+       fft_v1(r_i,        i_i,        r_o,            i_o,           half_size, stride*2);
+       fft_v1(r_i+stride, i_i+stride, r_o+half_size,  i_o+half_size, half_size, stride*2);
     } else {
        dft(r_i,        i_i,        r_o,            i_o,           half_size, stride*2);
        dft(r_i+stride, i_i+stride, r_o+half_size,  i_o+half_size, half_size, stride*2);
@@ -86,12 +134,34 @@ static void fft(double *r_i, double *i_i, double *r_o, double *i_o, int size, in
     }
 }
 
+void ts_sub(struct timespec *r, struct timespec *a, struct timespec *b) {
+   r->tv_sec = a->tv_sec - b->tv_sec;
+   if(a->tv_nsec > b->tv_nsec) {
+      r->tv_nsec = a->tv_nsec - b->tv_nsec;
+   } else {
+      r->tv_sec--;
+      r->tv_nsec = a->tv_nsec - b->tv_nsec+1000000000;
+   }
+}
+
+void check_error(double *r_ref, double *i_ref, double *r, double *j, int size) {
+   // Check for error
+   double error = 0.0;
+   for(int j = 0; j < FFT_SIZE; j++) {
+      error += fabs(dout_r_ref[j] - dout_r[j]); 
+      error += fabs(dout_i_ref[j] - dout_i[j]); 
+   };
+   printf("  Total error is %10e\n",error);
+}
+
 int main(int argc, char *argv[]) {
-   struct timespec tv_start, tv_middle, tv_end, tv_fft, tv_dft;
+   struct timespec tv_start_dft,    tv_end_dft,    tv_dft;
+   struct timespec tv_start_fft_v1, tv_end_fft_v1, tv_fft_v1;
+   struct timespec tv_start_fft_v2, tv_end_fft_v2, tv_fft_v2;
 
    // Setup
    for(int i = 0; i < FFT_SIZE; i++) {
-#if 1
+#if 0
       if(i %64 < 32)  
          din_r[i] =   1.0;
       else
@@ -104,44 +174,32 @@ int main(int argc, char *argv[]) {
    }
    init_tables();
 
-   // The time sensitive bits
-   clock_gettime(CLOCK_MONOTONIC, &tv_start);  
-   fft(din_r,din_i, dout_r,     dout_i, FFT_SIZE,1);
-   clock_gettime(CLOCK_MONOTONIC, &tv_middle);  
-   dft(din_r,din_i, dout_r_ref, dout_i_ref, FFT_SIZE,1);
-   clock_gettime(CLOCK_MONOTONIC, &tv_end);  
-
-   tv_fft.tv_sec = tv_middle.tv_sec - tv_start.tv_sec;
-   if(tv_middle.tv_nsec > tv_start.tv_nsec) {
-      tv_fft.tv_nsec = tv_middle.tv_nsec - tv_start.tv_nsec;
-   } else {
-      tv_fft.tv_sec--;
-      tv_fft.tv_nsec = tv_middle.tv_nsec - tv_start.tv_nsec+1000000000;
-   }
-
-   tv_dft.tv_sec = tv_end.tv_sec - tv_middle.tv_sec;
-   if(tv_end.tv_nsec > tv_middle.tv_nsec) {
-      tv_dft.tv_nsec = tv_end.tv_nsec - tv_middle.tv_nsec;
-   } else {
-      tv_dft.tv_sec--;
-      tv_dft.tv_nsec = tv_end.tv_nsec - tv_middle.tv_nsec+1000000000;
-   }
-
-   // Print results
-//   print_out(dout_r,     dout_i,     FFT_SIZE, "FFT");
-//   print_out(dout_r_ref, dout_i_ref, FFT_SIZE, "DFT reference");
    printf("Transform of %5i random complex numbers\n", FFT_SIZE);
    printf("=========================================\n");
-   printf("DFT %u.%09u\n",(unsigned)tv_dft.tv_sec, (unsigned)tv_dft.tv_nsec);
-   printf("FFT %u.%09u\n",(unsigned)tv_fft.tv_sec, (unsigned)tv_fft.tv_nsec);
 
-   // Check for error
-   double error = 0.0;
-   for(int i = 0; i < FFT_SIZE; i++) {
-      error += fabs(dout_r_ref[i] - dout_r[i]); 
-      error += fabs(dout_i_ref[i] - dout_i[i]); 
-   };
-   printf("Total error is %10f\n",error);
+   clock_gettime(CLOCK_MONOTONIC, &tv_start_dft);  
+   dft(din_r,din_i, dout_r_ref, dout_i_ref, FFT_SIZE,1);
+   clock_gettime(CLOCK_MONOTONIC, &tv_end_dft);  
+
+   ts_sub(&tv_dft,    &tv_end_dft,    &tv_start_dft);
+   printf("DFT %u.%09u secs\n",(unsigned)tv_dft.tv_sec, (unsigned)tv_dft.tv_nsec);
+
+   clock_gettime(CLOCK_MONOTONIC, &tv_start_fft_v1);  
+   fft_v1(din_r,din_i, dout_r,     dout_i, FFT_SIZE, 1);
+   clock_gettime(CLOCK_MONOTONIC, &tv_end_fft_v1);  
+
+   ts_sub(&tv_fft_v1, &tv_end_fft_v1, &tv_start_fft_v1);
+   printf("FFT recursive %u.%09u secs\n",(unsigned)tv_fft_v1.tv_sec, (unsigned)tv_fft_v1.tv_nsec);
+   check_error(dout_r_ref, dout_i_ref, dout_r,dout_i, FFT_SIZE);
+
+   clock_gettime(CLOCK_MONOTONIC, &tv_start_fft_v2);  
+   fft_v2(din_r,din_i, dout_r,     dout_i, FFT_SIZE);
+   clock_gettime(CLOCK_MONOTONIC, &tv_end_fft_v2);  
+
+   ts_sub(&tv_fft_v2, &tv_end_fft_v2, &tv_start_fft_v2);
+   printf("FFT looped    %u.%09u secs\n",(unsigned)tv_fft_v2.tv_sec, (unsigned)tv_fft_v2.tv_nsec);
+   check_error(dout_r_ref, dout_i_ref, dout_r,dout_i, FFT_SIZE);
+
    (void)print_out;  
 }
 
