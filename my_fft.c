@@ -42,8 +42,7 @@ static void print_out(double *d_r, double *d_i, int size, char *message) {
 }
 
 static void dft4(double *r_i, double *i_i, double *r_o, double *i_o, int stride) {
-//   int total_size = stride*4;
-   int total_size = FFT_SIZE;
+   int total_size = stride*4;
    // Bin 0
    r_o[0] = (r_i[0*stride] + r_i[1*stride] + r_i[2*stride] + r_i[3*stride])/total_size;
    i_o[0] = (i_i[0*stride] + i_i[1*stride] + i_i[2*stride] + i_i[3*stride])/total_size;
